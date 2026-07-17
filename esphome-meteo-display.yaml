@@ -1,0 +1,1247 @@
+esphome:
+  name: meteo-display
+  friendly_name: Meteo Display
+  on_boot:
+    - priority: 600.0
+      then:
+        - output.set_level:
+            id: lcd_backlight
+            level: 1.0
+    - priority: -100.0
+      then:
+        - output.set_level:
+            id: lcd_backlight
+            level: !lambda |-
+              float val = id(screen_brightness).state;
+              if (std::isnan(val) || val < 0.0f || val > 100.0f) {
+                return 1.0f;
+              }
+              return val / 100.0f;
+        - wait_until:
+            api.connected:
+        - delay: 2s
+        - lambda: |-
+            if (!id(history_initialized)) {
+              for (int i = 0; i < 48; i++) {
+                id(temp_history)[i] = NAN;
+                id(hum_history)[i] = NAN;
+                id(press_history)[i] = NAN;
+              }
+              id(temp_history)[47] = id(backyard_temperature).state;
+              id(hum_history)[47] = id(backyard_humidity).state;
+              id(press_history)[47] = id(outdoor_pressure).state;
+              id(history_initialized) = true;
+            }
+        - component.update: lcd
+        - script.execute: page_cycling  # ✅ Avviamento iniziale UNICO
+
+globals:
+  - id: temp_history
+    type: float[48]
+    restore_value: yes
+  - id: hum_history
+    type: float[48]
+    restore_value: yes
+  - id: press_history
+    type: float[48]
+    restore_value: yes
+  - id: history_initialized
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: active_page
+    type: int
+    initial_value: '0'
+  - id: cycle_paused
+    type: bool
+    initial_value: 'false'
+  - id: click_pending
+    type: bool
+    initial_value: 'false'
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_password
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: web_server
+
+web_server:
+  port: 80
+
+http_request:
+  useragent: esphome/device
+  timeout: 10s
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Meteo-Display-AP"
+    password: !secret ap_password
+
+captive_portal:
+
+i2c:
+  sda: GPIO27
+  scl: GPIO18
+  frequency: 100kHz
+
+spi:
+  - id: hspi
+    clk_pin: GPIO14
+    mosi_pin: GPIO13
+    miso_pin: GPIO12
+  - id: touch_spi
+    clk_pin: GPIO25
+    mosi_pin: GPIO32
+    miso_pin: GPIO39
+
+touchscreen:
+  - platform: xpt2046
+    id: my_touchscreen
+    spi_id: touch_spi
+    cs_pin: GPIO33
+    interrupt_pin: GPIO36
+    calibration:
+      x_min: 222
+      x_max: 3367
+      y_min: 192
+      y_max: 3732
+    transform:
+      swap_xy: true
+
+output:
+  - platform: ledc
+    pin: GPIO21
+    id: lcd_backlight
+    frequency: 1000Hz
+
+number:
+  - platform: template
+    name: "Screen Brightness"
+    id: screen_brightness
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 100
+    optimistic: true
+    restore_value: true
+    set_action:
+      - output.set_level:
+          id: lcd_backlight
+          level: !lambda 'return x / 100.0;'
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    spi_id: hspi
+    model: ST7789V
+    dimensions:
+      width: 240
+      height: 320
+    cs_pin: GPIO15
+    dc_pin: GPIO2
+    color_order: BGR
+    invert_colors: false
+    data_rate: 8MHz
+    auto_clear_enabled: false
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    timezone: "Europe/Rome"
+
+sensor:
+  - platform: sht3xd
+    temperature:
+      name: "Living Room Temperature"
+      id: living_room_temperature
+    humidity:
+      name: "Living Room Humidity"
+      id: living_room_humidity
+    address: 0x44
+    update_interval: 10s
+
+  - platform: homeassistant
+    id: backyard_temperature
+    entity_id: weather.tomorrow_io_home_daily
+    attribute: temperature
+  - platform: homeassistant
+    id: backyard_humidity
+    entity_id: weather.tomorrow_io_home_daily
+    attribute: humidity
+  - platform: homeassistant
+    id: wind_speed
+    entity_id: weather.tomorrow_io_home_daily
+    attribute: wind_speed
+  - platform: homeassistant
+    id: wind_bearing
+    entity_id: weather.tomorrow_io_home_daily
+    attribute: wind_bearing
+  - platform: homeassistant
+    id: outdoor_pressure
+    entity_id: weather.tomorrow_io_home_daily
+    attribute: pressure
+
+  - platform: homeassistant
+    id: batt_charging_watt
+    entity_id: sensor.batt_charging_watt
+  - platform: homeassistant
+    id: batt_discharging_watt
+    entity_id: sensor.batt_discharging_watt
+  - platform: homeassistant
+    id: battery_capacity
+    entity_id: sensor.battery_capacity
+  - platform: homeassistant
+    id: potenza_ist
+    entity_id: sensor.potenza_ist
+  - platform: homeassistant
+    id: pv_charging_power
+    entity_id: sensor.pv_charging_power
+  - platform: homeassistant
+    id: load_watt
+    entity_id: sensor.load_watt
+
+text_sensor:
+  - platform: homeassistant
+    id: forecast_condition
+    entity_id: weather.tomorrow_io_home_daily
+
+image:
+  - file: "images/generic_bg.png"
+    id: generic_bg_img
+    type: RGB565
+
+font:
+  - file: "gfonts://Montserrat"
+    id: montserrat_14
+    size: 14
+    bpp: 4
+    glyphs: "0123456789.,°%-"
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_20
+    size: 20
+    bpp: 4
+    glyphs: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ:,°%/- ()"
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_28
+    size: 28
+    bpp: 4
+    glyphs: "0123456789:%"
+
+  - file: "gfonts://Montserrat"
+    id: montserrat_42
+    size: 42
+    bpp: 4
+    glyphs: "0123456789.,°%-"
+
+  - file: "gfonts://Montserrat@bold"
+    id: montserrat_bold_72
+    size: 72
+    bpp: 4
+    glyphs: "0123456789.°CF-"
+
+  - file: "gfonts://Roboto Condensed"
+    id: weather_icons_48
+    size: 48
+    bpp: 4
+    extras:
+      - file: "fonts/materialdesignicons-webfont.ttf"
+        glyphs: [
+          "\U000F005D",
+          "\U000F005C",
+          "\U000F0054",
+          "\U000F0043",
+          "\U000F0045",
+          "\U000F0042",
+          "\U000F004D",
+          "\U000F005B"
+        ]
+
+  - file: "gfonts://Roboto Condensed"
+    id: weather_icons_72
+    size: 72
+    bpp: 4
+    extras:
+      - file: "fonts/materialdesignicons-webfont.ttf"
+        glyphs: [
+          "\U000F0590",
+          "\U000F0591",
+          "\U000F0592",
+          "\U000F0593",
+          "\U000F067E",
+          "\U000F0594",
+          "\U000F0595",
+          "\U000F0596",
+          "\U000F0597",
+          "\U000F0598",
+          "\U000F067F",
+          "\U000F0599",
+          "\U000F059D",
+          "\U000F059E"
+        ]
+
+  - file: "gfonts://Roboto Condensed"
+    id: solar_icons_48
+    size: 48
+    bpp: 4
+    extras:
+      - file: "fonts/materialdesignicons-webfont.ttf"
+        glyphs: [
+          "\U000F06A1",
+          "\U000F0D9C",
+          "\U000F0D3E",
+          "\U000F12A3",
+          "\U000F12A2",
+          "\U000F12A1",
+          "\U000F005D",
+          "\U000F0045",
+          "\U000F0054",
+          "\U000F004D"
+        ]
+
+lvgl:
+  buffer_size: 25%
+  displays:
+    - lcd
+  rotation: 0
+  
+  on_idle:
+    - timeout: 60s
+      then:
+        - globals.set:
+            id: active_page
+            value: '0'
+        - lvgl.page.show: main_page
+        - if:
+            condition:
+              lambda: 'return !id(cycle_paused);'
+            then:
+              - script.execute: page_cycling
+
+  style_definitions:
+    - id: dark_bg
+      bg_color: 0x0a0a0a
+      bg_opa: COVER
+      text_color: 0xFFFFFF
+    - id: bg_img_style
+      opa: 80%
+
+  pages:
+    - id: main_page
+      bg_color: 0x0a0a0a
+      scrollbar_mode: "off"
+      widgets:
+        - obj:
+            id: main_page_bg
+            width: 100%
+            height: 100%
+            bg_color: 0x0a0a0a
+            border_width: 0
+            radius: 0
+            on_click:
+              then:
+                - script.execute: handle_page_click
+
+        - image:
+            id: main_page_bg_img
+            src: generic_bg_img
+            align: CENTER
+            x: 0
+            y: 0
+            styles:
+              - bg_img_style
+
+        - label:
+            id: date_display
+            text: "-:-"
+            align: TOP_LEFT
+            x: 10
+            y: 5
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - label:
+            id: time_display
+            text: "-:-"
+            align: TOP_RIGHT
+            x: -10
+            y: 5
+            text_font: montserrat_28
+            text_color: 0x00FF00
+
+        - label:
+            id: living_room_temperature_label
+            text: "-"
+            align: TOP_LEFT
+            x: 15
+            y: 35
+            text_font: montserrat_42
+        - label:
+            id: living_room_humidity_label
+            text: "-"
+            align: TOP_RIGHT
+            x: -15
+            y: 35
+            text_font: montserrat_42
+
+        - obj:
+            align: TOP_LEFT
+            x: 5
+            y: 95
+            width: 230
+            height: 1
+            bg_color: 0x555555
+            border_width: 0 
+
+        - label:
+            text: "Outside"
+            align: TOP_LEFT
+            x: 10
+            y: 105
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+            
+        - label:
+            id: forecast_icon
+            text: "?"
+            align: TOP_LEFT
+            x: 15
+            y: 135
+            text_font: weather_icons_72
+            
+        - label:
+            id: backyard_temperature_label
+            text: "-"
+            align: TOP_RIGHT
+            x: -10
+            y: 100
+            text_font: montserrat_bold_72
+            text_color: 0xFFFFFF
+
+        - label:
+            id: backyard_humidity_label
+            text: "-"
+            align: TOP_RIGHT
+            x: -10
+            y: 175
+            text_font: montserrat_28
+            text_color: 0xFFFFFF
+
+        - obj:
+            align: TOP_LEFT
+            x: 5
+            y: 245
+            width: 230
+            height: 1
+            bg_color: 0x555555
+            border_width: 0 
+
+        - label:
+            id: pressure_label
+            text: "-"
+            align: TOP_RIGHT
+            x: -10
+            y: 210
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - label:
+            id: wind_label
+            text: "-"
+            align: TOP_LEFT
+            x: 15
+            y: 255
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - label:
+            id: wind_arrow
+            text: ""
+            align: TOP_LEFT
+            x: 165
+            y: 245
+            text_font: weather_icons_48
+            text_color: 0xFFFFFF
+
+    - id: solar_page
+      bg_color: 0x0a0a0a
+      scrollbar_mode: "off"
+      widgets:
+        - obj:
+            id: solar_page_bg
+            width: 100%
+            height: 100%
+            bg_color: 0x0a0a0a
+            border_width: 0
+            radius: 0
+            on_click:
+              then:
+                - script.execute: handle_page_click
+
+        - image:
+            id: solar_page_bg_img
+            src: generic_bg_img
+            align: CENTER
+            x: 0
+            y: 0
+            styles:
+              - bg_img_style
+
+        - label:
+            id: solar_icon
+            text: "\U000F0D9C"
+            align: TOP_LEFT
+            x: 96
+            y: 10
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: solar_value
+            text: "-"
+            align: TOP_LEFT
+            x: 150
+            y: 24
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+
+        - label:
+            id: solar_to_house_arrow
+            text: "\U000F0045"
+            align: TOP_LEFT
+            x: 97
+            y: 65
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: grid_icon
+            text: "\U000F0D3E"
+            align: TOP_LEFT
+            x: 10
+            y: 120
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: grid_value
+            text: "-"
+            align: TOP_LEFT
+            x: 10
+            y: 175
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+
+        - label:
+            id: grid_to_house_arrow
+            text: ""
+            align: TOP_LEFT
+            x: 62
+            y: 130
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: house_icon
+            text: "\U000F06A1"
+            align: TOP_LEFT
+            x: 96
+            y: 120
+            text_font: solar_icons_48
+            text_color: 0xFFFFFF
+
+        - label:
+            id: house_value
+            text: "-"
+            align: TOP_LEFT
+            x: 150
+            y: 134
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+
+        - label:
+            id: house_to_battery_arrow
+            text: ""
+            align: TOP_LEFT
+            x: 97
+            y: 175
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: battery_icon
+            text: "\U000F12A2"
+            align: TOP_LEFT
+            x: 96
+            y: 230
+            text_font: solar_icons_48
+            text_color: 0x555555
+
+        - label:
+            id: battery_capacity_value
+            text: "-"
+            align: TOP_LEFT
+            x: 35
+            y: 244
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+
+        - label:
+            id: battery_charging_value
+            text: "-"
+            align: TOP_LEFT
+            x: 150
+            y: 230
+            text_font: montserrat_20
+            text_color: 0x55FF55
+
+        - label:
+            id: battery_discharging_value
+            text: "-"
+            align: TOP_LEFT
+            x: 150
+            y: 260
+            text_font: montserrat_20
+            text_color: 0xFF5555
+
+    - id: charts_page
+      bg_color: 0x0a0a0a
+      scrollbar_mode: "off"
+      widgets:
+        - obj:
+            id: charts_page_bg
+            width: 100%
+            height: 100%
+            bg_color: 0x0a0a0a
+            border_width: 0
+            radius: 0
+            on_click:
+              then:
+                - globals.set:
+                    id: active_page
+                    value: '0'
+                - lvgl.page.show: main_page
+                - if:
+                    condition:
+                      lambda: 'return !id(cycle_paused);'
+                    then:
+                      - script.execute: page_cycling
+        - label:
+            text: "Storico ultime 24h"
+            align: TOP_MID
+            x: 0
+            y: 5
+            text_font: montserrat_20
+            text_color: 0x00FF00
+        - label:
+            text: "Temperatura (°C)"
+            align: TOP_LEFT
+            x: 10
+            y: 30
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - canvas:
+            id: temp_chart
+            align: TOP_LEFT
+            x: 10
+            y: 53
+            width: 220
+            height: 55
+        - label:
+            id: temp_max_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 55
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            id: temp_min_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 91
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            text: "Umidita' (%)"
+            align: TOP_LEFT
+            x: 10
+            y: 118
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - canvas:
+            id: hum_chart
+            align: TOP_LEFT
+            x: 10
+            y: 141
+            width: 220
+            height: 55
+        - label:
+            id: hum_max_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 143
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            id: hum_min_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 179
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            text: "Pressione (hPa)"
+            align: TOP_LEFT
+            x: 10
+            y: 206
+            text_font: montserrat_20
+            text_color: 0xFFFFFF
+        - canvas:
+            id: press_chart
+            align: TOP_LEFT
+            x: 10
+            y: 229
+            width: 220
+            height: 55
+        - label:
+            id: press_max_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 231
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            id: press_min_label
+            text: "--"
+            align: TOP_RIGHT
+            x: -15
+            y: 267
+            text_font: montserrat_14
+            text_color: 0x888888
+        - label:
+            text: "Tocca per tornare"
+            align: TOP_MID
+            x: 0
+            y: 295
+            text_font: montserrat_20
+            text_color: 0x888888
+
+
+# ✅ SCRIPT CORRETTO - SENZA LOOP INFINITO
+script:
+  # Script principale di cycling pagine - NON RICORSIVO
+  - id: page_cycling
+    mode: single  # ✅ CAMBIAMENTO: single invece di restart
+    then:
+      - while:
+          condition:
+            lambda: 'return !id(cycle_paused);'  # ✅ Loop controllato da while
+          then:
+            - delay: 10s  # Attesa tra pagine
+            - if:
+                condition:
+                  lambda: 'return id(active_page) == 0;'
+                then:
+                  - globals.set:
+                      id: active_page
+                      value: '1'
+                  - lvgl.page.show: solar_page
+                else:
+                  - if:
+                      condition:
+                        lambda: 'return id(active_page) == 1;'
+                      then:
+                        - globals.set:
+                            id: active_page
+                            value: '0'
+                        - lvgl.page.show: main_page
+
+  # Script per gestire i click con doppio tap
+  - id: handle_page_click
+    mode: single  # ✅ CAMBIAMENTO: single per evitare sovrapposizioni
+    then:
+      - if:
+          condition:
+            lambda: 'return id(click_pending);'
+          then:
+            # ✅ DOPPIO TAP RILEVATO: Pausa/Riprendi cycling
+            - globals.set:
+                id: click_pending
+                value: 'false'
+            - lambda: |-
+                id(cycle_paused) = !id(cycle_paused);
+                if (id(cycle_paused)) {
+                  ESP_LOGI("click", "Page cycling PAUSED");
+                } else {
+                  ESP_LOGI("click", "Page cycling RESUMED");
+                  id(page_cycling).execute();
+                }
+          else:
+            # ✅ PRIMO TAP: Imposta flag e attendi 350ms per doppio tap
+            - globals.set:
+                id: click_pending
+                value: 'true'
+            - delay: 350ms
+            - if:
+                condition:
+                  lambda: 'return id(click_pending);'
+                then:
+                  # ✅ SINGOLO TAP: Cambia pagina
+                  - globals.set:
+                      id: click_pending
+                      value: 'false'
+                  - if:
+                      condition:
+                        lambda: 'return id(active_page) == 0;'
+                      then:
+                        - globals.set:
+                            id: active_page
+                            value: '1'
+                        - lvgl.page.show: solar_page
+                      else:
+                        - if:
+                            condition:
+                              lambda: 'return id(active_page) == 1;'
+                            then:
+                              - globals.set:
+                                  id: active_page
+                                  value: '2'
+                              - lvgl.page.show: charts_page
+                              - lambda: 'id(cycle_paused) = true;'  # Pausa cycling in charts
+
+
+interval:
+  - interval: 5s
+    then:
+      - lvgl.label.update:
+          id: time_display
+          text: !lambda |-
+            return id(homeassistant_time).now().strftime("%H:%M").c_str();
+      - lvgl.label.update:
+          id: date_display
+          text: !lambda |-
+            auto time = id(homeassistant_time).now();
+            std::string day;
+            switch (time.day_of_week) {
+              case 1: day = "Dom"; break;
+              case 2: day = "Lun"; break;
+              case 3: day = "Mar"; break;
+              case 4: day = "Mer"; break;
+              case 5: day = "Gio"; break;
+              case 6: day = "Ven"; break;
+              case 7: day = "Sab"; break;
+              default: day = "---"; break;
+            }
+            std::string month;
+            switch (time.month) {
+              case 1: month = "Gen"; break;
+              case 2: month = "Feb"; break;
+              case 3: month = "Mar"; break;
+              case 4: month = "Apr"; break;
+              case 5: month = "Mag"; break;
+              case 6: month = "Giu"; break;
+              case 7: month = "Lug"; break;
+              case 8: month = "Ago"; break;
+              case 9: month = "Set"; break;
+              case 10: month = "Ott"; break;
+              case 11: month = "Nov"; break;
+              case 12: month = "Dic"; break;
+              default: month = "---"; break;
+            }
+            return str_sprintf("%s, %02d %s", day.c_str(), time.day_of_month, month.c_str());
+      - lvgl.label.update:
+          id: backyard_temperature_label
+          text: !lambda |-
+            return str_sprintf("%.0f°", id(backyard_temperature).state);
+      - lvgl.label.update:
+          id: backyard_humidity_label
+          text: !lambda |-
+            return str_sprintf("%.0f%%", id(backyard_humidity).state);
+          text_color: !lambda |-
+            float hum = id(backyard_humidity).state;
+            if (hum < 30) return lv_color_hex(0xD2691E);
+            if (hum < 45) return lv_color_hex(0xDEB887);
+            if (hum < 60) return lv_color_hex(0x87CEEB);
+            if (hum < 75) return lv_color_hex(0x4682B4);
+            return lv_color_hex(0x1E90FF);
+
+      - lvgl.label.update:
+          id: wind_label
+          text: !lambda |-
+            float speed = id(wind_speed).state;
+            float bearing = id(wind_bearing).state;
+            std::string dir = "N";
+            if (bearing >= 337.5 || bearing < 22.5) dir = "N";
+            else if (bearing >= 22.5 && bearing < 67.5) dir = "NE";
+            else if (bearing >= 67.5 && bearing < 112.5) dir = "E";
+            else if (bearing >= 112.5 && bearing < 157.5) dir = "SE";
+            else if (bearing >= 157.5 && bearing < 202.5) dir = "S";
+            else if (bearing >= 202.5 && bearing < 247.5) dir = "SO";
+            else if (bearing >= 247.5 && bearing < 292.5) dir = "O";
+            else if (bearing >= 292.5 && bearing < 337.5) dir = "NO";
+            return str_sprintf("%.1f km/h %s", speed, dir.c_str());
+      
+      # ✅ FRECCIA VENTO - Glifi corretti da Material Design Icons
+      - lvgl.label.update:
+          id: wind_arrow
+          text: !lambda |-
+            float bearing = id(wind_bearing).state;
+            if (bearing >= 337.5 || bearing < 22.5) return "\U000F005D";     // mdi-arrow-up (N)
+            if (bearing >= 22.5 && bearing < 67.5) return "\U000F005C";      // mdi-arrow-top-right (NE)
+            if (bearing >= 67.5 && bearing < 112.5) return "\U000F0054";     // mdi-arrow-right (E)
+            if (bearing >= 112.5 && bearing < 157.5) return "\U000F0043";    // mdi-arrow-bottom-right (SE)
+            if (bearing >= 157.5 && bearing < 202.5) return "\U000F0045";    // mdi-arrow-down (S)
+            if (bearing >= 202.5 && bearing < 247.5) return "\U000F0042";    // mdi-arrow-bottom-left (SO)
+            if (bearing >= 247.5 && bearing < 292.5) return "\U000F004D";    // mdi-arrow-left (O)
+            if (bearing >= 292.5 && bearing < 337.5) return "\U000F005B";    // mdi-arrow-top-left (NO)
+            return "?";
+      
+      - lvgl.label.update:
+          id: pressure_label
+          text: !lambda |-
+            return str_sprintf("%.0f hPa", id(outdoor_pressure).state);
+      
+      - lvgl.label.update:
+          id: living_room_temperature_label
+          text: !lambda |-
+            return str_sprintf("%.0f°", id(living_room_temperature).state);
+          text_color: !lambda |-
+            float temp = id(living_room_temperature).state;
+            if (temp < 67) return lv_color_hex(0x6666FF);
+            if (temp < 69) return lv_color_hex(0x9999FF);
+            if (temp < 71) return lv_color_hex(0xFFFFFF);
+            if (temp < 73) return lv_color_hex(0xFFC266);
+            return lv_color_hex(0xFF6666);
+      
+      - lvgl.label.update:
+          id: living_room_humidity_label
+          text: !lambda |-
+            return str_sprintf("%.0f%%", id(living_room_humidity).state);
+          text_color: !lambda |-
+            float hum = id(living_room_humidity).state;
+            if (hum < 30) return lv_color_hex(0xD2691E);
+            if (hum < 45) return lv_color_hex(0xDEB887);
+            if (hum < 60) return lv_color_hex(0x87CEEB);
+            if (hum < 75) return lv_color_hex(0x4682B4);
+            return lv_color_hex(0x1E90FF);
+      
+      # ✅ ICONE METEO - Glifi corretti da Material Design Icons
+      - lvgl.label.update:
+          id: forecast_icon
+          text: !lambda |-
+            std::string condition = id(forecast_condition).state;
+            auto label = id(forecast_icon);
+            
+            if (condition == "sunny") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xFFD700), 0);
+              return "\U000F0599";  // mdi-weather-sunny
+            } else if (condition == "clear-night") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0x87CEEB), 0);
+              return "\U000F0594";  // mdi-weather-night
+            } else if (condition == "partlycloudy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xAAAAAA), 0);
+              return "\U000F0595";  // mdi-weather-partly-cloudy
+            } else if (condition == "cloudy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xAAAAAA), 0);
+              return "\U000F0590";  // mdi-weather-cloudy
+            } else if (condition == "rainy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0x4A90E2), 0);
+              return "\U000F0597";  // mdi-weather-rainy
+            } else if (condition == "pouring") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0x4A90E2), 0);
+              return "\U000F0596";  // mdi-weather-pouring
+            } else if (condition == "snowy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xE0F7FF), 0);
+              return "\U000F0598";  // mdi-weather-snowy
+            } else if (condition == "snowy-rainy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0x87CEEB), 0);
+              return "\U000F067F";  // mdi-weather-snowy-rainy
+            } else if (condition == "lightning") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xFFFF00), 0);
+              return "\U000F0593";  // mdi-weather-lightning
+            } else if (condition == "lightning-rainy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xFFFF00), 0);
+              return "\U000F067E";  // mdi-weather-lightning-rainy
+            } else if (condition == "fog") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xCCCCCC), 0);
+              return "\U000F0591";  // mdi-weather-fog
+            } else if (condition == "hail") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xE0F7FF), 0);
+              return "\U000F0592";  // mdi-weather-hail
+            } else if (condition == "windy") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xAAAAAA), 0);
+              return "\U000F059D";  // mdi-weather-windy
+            } else if (condition == "windy-variant") {
+              lv_obj_set_style_text_color(label, lv_color_hex(0xAAAAAA), 0);
+              return "\U000F059E";  // mdi-weather-windy-variant
+            }
+            lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+            return "--";
+
+      ## Solar monitoring page updates
+      - lvgl.label.update:
+          id: solar_value
+          text: !lambda |-
+            float pv = id(pv_charging_power).state;
+            if (std::isnan(pv)) return "--- W";
+            return str_sprintf("%.0f W", pv);
+          text_color: !lambda |-
+            float pv = id(pv_charging_power).state;
+            if (std::isnan(pv) || pv <= 5.0f) return lv_color_hex(0x555555);
+            return lv_color_hex(0xFFD700);
+      
+      - lvgl.label.update:
+          id: solar_icon
+          text_color: !lambda |-
+            float pv = id(pv_charging_power).state;
+            if (std::isnan(pv) || pv <= 5.0f) return lv_color_hex(0x555555);
+            return lv_color_hex(0xFFD700);
+      
+      - lvgl.label.update:
+          id: solar_to_house_arrow
+          text_color: !lambda |-
+            float pv = id(pv_charging_power).state;
+            if (std::isnan(pv) || pv <= 5.0f) return lv_color_hex(0x555555);
+            return lv_color_hex(0xFFD700);
+
+      - lvgl.label.update:
+          id: house_value
+          text: !lambda |-
+            float load = id(load_watt).state;
+            if (std::isnan(load)) return "--- W";
+            return str_sprintf("%.0f W", load);
+          text_color: !lambda |-
+            float load = id(load_watt).state;
+            if (std::isnan(load) || load <= 5.0f) return lv_color_hex(0x888888);
+            return lv_color_hex(0xFFFFFF);
+      
+      - lvgl.label.update:
+          id: house_icon
+          text_color: !lambda |-
+            float load = id(load_watt).state;
+            if (std::isnan(load) || load <= 5.0f) return lv_color_hex(0x888888);
+            return lv_color_hex(0x00FF00);
+
+      - lvgl.label.update:
+          id: grid_value
+          text: !lambda |-
+            float grid = id(potenza_ist).state;
+            if (std::isnan(grid)) return "--- W";
+            if (grid < 0.0f) {
+              return str_sprintf("%.0f W", std::abs(grid));
+            }
+            return str_sprintf("%.0f W", grid);
+          text_color: !lambda |-
+            float grid = id(potenza_ist).state;
+            if (std::isnan(grid) || std::abs(grid) < 5.0f) return lv_color_hex(0x888888);
+            if (grid < 0.0f) return lv_color_hex(0x55FF55);
+            return lv_color_hex(0xFF5555);
+      
+      - lvgl.label.update:
+          id: grid_icon
+          text_color: !lambda |-
+            float grid = id(potenza_ist).state;
+            if (std::isnan(grid) || std::abs(grid) < 5.0f) return lv_color_hex(0x888888);
+            if (grid < 0.0f) return lv_color_hex(0x55FF55);
+            return lv_color_hex(0xFF5555);
+      
+      # ✅ FRECCIA GRID - Glifi corretti da Material Design Icons
+      - lvgl.label.update:
+          id: grid_to_house_arrow
+          text: !lambda |-
+            float grid = id(potenza_ist).state;
+            if (std::isnan(grid) || std::abs(grid) < 5.0f) return "";
+            if (grid < 0.0f) return "\U000F004D";  // mdi-arrow-left (Export to grid)
+            return "\U000F0054";                    // mdi-arrow-right (Import from grid)
+          text_color: !lambda |-
+            float grid = id(potenza_ist).state;
+            if (std::isnan(grid) || std::abs(grid) < 5.0f) return lv_color_hex(0x555555);
+            if (grid < 0.0f) return lv_color_hex(0x55FF55);
+            return lv_color_hex(0xFF5555);
+
+      # ✅ ICONA BATTERIA - Glifi corretti da Material Design Icons
+      - lvgl.label.update:
+          id: battery_icon
+          text: !lambda |-
+            float cap = id(battery_capacity).state;
+            if (std::isnan(cap)) return "\U000F12A2";  // mdi-battery-medium (default)
+            if (cap >= 70.0f) return "\U000F12A3";     // mdi-battery-high
+            if (cap >= 30.0f) return "\U000F12A2";     // mdi-battery-medium
+            return "\U000F12A1";                       // mdi-battery-low
+          text_color: !lambda |-
+            float cap = id(battery_capacity).state;
+            if (std::isnan(cap)) return lv_color_hex(0x888888);
+            if (cap >= 70.0f) return lv_color_hex(0x55FF55);  // Green
+            if (cap >= 30.0f) return lv_color_hex(0xFFCC00);  // Yellow
+            return lv_color_hex(0xFF5555);                    // Red
+      
+      - lvgl.label.update:
+          id: battery_capacity_value
+          text: !lambda |-
+            float cap = id(battery_capacity).state;
+            if (std::isnan(cap)) return "--- %";
+            return str_sprintf("%.0f%%", cap);
+          text_color: !lambda |-
+            float cap = id(battery_capacity).state;
+            if (std::isnan(cap)) return lv_color_hex(0x888888);
+            if (cap >= 70.0f) return lv_color_hex(0x55FF55);
+            if (cap >= 30.0f) return lv_color_hex(0xFFCC00);
+            return lv_color_hex(0xFF5555);
+      
+      - lvgl.label.update:
+          id: battery_charging_value
+          text: !lambda |-
+            float chg = id(batt_charging_watt).state;
+            if (std::isnan(chg) || chg <= 5.0f) return "0 W";
+            return str_sprintf("%.0f W", chg);
+          text_color: !lambda |-
+            float chg = id(batt_charging_watt).state;
+            if (std::isnan(chg) || chg <= 5.0f) return lv_color_hex(0x555555);
+            return lv_color_hex(0x55FF55);
+      
+      - lvgl.label.update:
+          id: battery_discharging_value
+          text: !lambda |-
+            float dis = id(batt_discharging_watt).state;
+            if (std::isnan(dis) || dis <= 5.0f) return "0 W";
+            return str_sprintf("%.0f W", dis);
+          text_color: !lambda |-
+            float dis = id(batt_discharging_watt).state;
+            if (std::isnan(dis) || dis <= 5.0f) return lv_color_hex(0x555555);
+            return lv_color_hex(0xFF5555);
+      
+      # ✅ FRECCE BATTERIA - Glifi corretti da Material Design Icons
+      - lvgl.label.update:
+          id: house_to_battery_arrow
+          text: !lambda |-
+            float chg = id(batt_charging_watt).state;
+            float dis = id(batt_discharging_watt).state;
+            if (chg > 5.0f) return "\U000F0045";  // mdi-arrow-down (Charging)
+            if (dis > 5.0f) return "\U000F005D";  // mdi-arrow-up (Discharging)
+            return "";
+          text_color: !lambda |-
+            float chg = id(batt_charging_watt).state;
+            float dis = id(batt_discharging_watt).state;
+            if (chg > 5.0f) return lv_color_hex(0x55FF55);
+            if (dis > 5.0f) return lv_color_hex(0xFF5555);
+            return lv_color_hex(0x555555);
+
+      - lambda: |-
+          auto draw_chart = [](lv_obj_t* canvas, float* history, lv_color_t color, lv_obj_t* min_lbl, lv_obj_t* max_lbl, const char* unit) {
+            lv_canvas_fill_bg(canvas, lv_color_hex(0x121212), LV_OPA_COVER);
+            
+            lv_layer_t layer;
+            lv_canvas_init_layer(canvas, &layer);
+
+            lv_draw_line_dsc_t grid_dsc;
+            lv_draw_line_dsc_init(&grid_dsc);
+            grid_dsc.width = 1;
+            grid_dsc.color = lv_color_hex(0x222222);
+            for (int y_grid = 11; y_grid < 55; y_grid += 11) {
+              grid_dsc.p1.x = 0;
+              grid_dsc.p1.y = y_grid;
+              grid_dsc.p2.x = 220;
+              grid_dsc.p2.y = y_grid;
+              lv_draw_line(&layer, &grid_dsc);
+            }
+
+            float min_val = 9999.0f;
+            float max_val = -9999.0f;
+            bool has_data = false;
+            for (int i = 0; i < 48; i++) {
+              float val = history[i];
+              if (!std::isnan(val)) {
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+                has_data = true;
+              }
+            }
+
+            if (has_data) {
+              char min_str[32];
+              char max_str[32];
+              if (strcmp(unit, "%") == 0 || strcmp(unit, " hPa") == 0) {
+                sprintf(min_str, "%.0f%s", min_val, unit);
+                sprintf(max_str, "%.0f%s", max_val, unit);
+              } else {
+                sprintf(min_str, "%.1f%s", min_val, unit);
+                sprintf(max_str, "%.1f%s", max_val, unit);
+              }
+              lv_label_set_text(min_lbl, min_str);
+              lv_label_set_text(max_lbl, max_str);
+
+              lv_draw_line_dsc_t line_dsc;
+              lv_draw_line_dsc_init(&line_dsc);
+              line_dsc.width = 2;
+              line_dsc.color = color;
+
+              float range = max_val - min_val;
+              float last_x = -1.0f;
+              float last_y = -1.0f;
+
+              for (int i = 0; i < 48; i++) {
+                float val = history[i];
+                if (!std::isnan(val)) {
+                  float x = i * (220.0f / 47.0f);
+                  float y;
+                  if (range < 0.01f) {
+                    y = 55.0f / 2.0f;
+                  } else {
+                    y = 50.0f - (val - min_val) * 45.0f / range;
+                  }
+
+                  if (last_x >= 0.0f) {
+                    line_dsc.p1.x = (int32_t)last_x;
+                    line_dsc.p1.y = (int32_t)last_y;
+                    line_dsc.p2.x = (int32_t)x;
+                    line_dsc.p2.y = (int32_t)y;
+                    lv_draw_line(&layer, &line_dsc);
+                  }
+                  last_x = x;
+                  last_y = y;
+                }
+              }
+            } else {
+              lv_label_set_text(min_lbl, "--");
+              lv_label_set_text(max_lbl, "--");
+            }
+
+            lv_canvas_finish_layer(canvas, &layer);
+            lv_obj_invalidate(canvas);
+          };
+
+          if (id(active_page) == 2) {
+            draw_chart(id(temp_chart), id(temp_history), lv_color_hex(0xFF5555), id(temp_min_label), id(temp_max_label), "°");
+            draw_chart(id(hum_chart), id(hum_history), lv_color_hex(0x5555FF), id(hum_min_label), id(hum_max_label), "%");
+            draw_chart(id(press_chart), id(press_history), lv_color_hex(0x55FF55), id(press_min_label), id(press_max_label), " hPa");
+          }
+
+  - interval: 30min
+    then:
+      - lambda: |-
+          for (int i = 0; i < 47; i++) {
+            id(temp_history)[i] = id(temp_history)[i+1];
+            id(hum_history)[i] = id(hum_history)[i+1];
+            id(press_history)[i] = id(press_history)[i+1];
+          }
+          id(temp_history)[47] = id(backyard_temperature).state;
+          id(hum_history)[47] = id(backyard_humidity).state;
+          id(press_history)[47] = id(outdoor_pressure).state;
